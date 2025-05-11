@@ -437,7 +437,7 @@ def detect(
     with tqdm(total=len(src_images), unit="image") as progress_bar:
         for image_path in src_images:
 
-            progress_bar.set_description(f"{os.path.basename(src).split('.')[0]}")
+            progress_bar.set_description(f"{os.path.basename(src).split(".")[0]}")
 
             detects = detect_image(
                 image_path,
