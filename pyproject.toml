@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geoyolo"
+version = "0.1.0"
+authors = [
+    { name = "Andrew Ryan", email = "andrewryan@duck.com" }
+]
+description = "A high performance object detection inference engine for arbitrarily large satellite imagery."
+readme = "README.pypi.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "scikit-learn",
+    "pandas",
+    "rtree",
+    "pyqtree",
+    "numba",
+    "tqdm",
+    "Pillow",
+    "geopandas",
+    "matplotlib",
+    "shapely",
+    "affine",
+    "rasterio",
+    "torch",
+    "torchvision",
+    "psycopg2-binary",
+    "sqlalchemy",
+    "ultralytics",
+    "scikit-image",
+    "albumentations",
+    "pre-commit",
+    "pytest",
+    "black",
+    "flake8",
+    "isort",
+    "mypy",
+    "detect-secrets",
+    "no_implicit_optional"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/andreweryan/geoyolo"
+"Bug Tracker" = "https://github.com/andreweryan/geoyolo/issues"
+"Source Code" = "https://github.com/andreweryan/geoyolo"
+
+[tool.setuptools.packages]
+find = {}
+
+[project.scripts]
+geoyolo = "geoyolo.cli:main"
