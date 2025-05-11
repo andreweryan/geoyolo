@@ -28,6 +28,13 @@ def main():
     )
 
     detect_parser.add_argument(
+        "--device",
+        type=str,
+        default="0",
+        help="Inference device to use, e.g., 0, cpu, mps.",
+    )
+
+    detect_parser.add_argument(
         "--window_size",
         type=int,
         default=1024,
@@ -39,6 +46,13 @@ def main():
         type=float,
         default=0.20,
         help="Sliding window overlap in horizontal and vertical direction.",
+    )
+
+    detect_parser.add_argument(
+        "--bands",
+        nargs="*",
+        default=False,
+        help="1-indexed bands to use to use for inference.",
     )
 
     detect_parser.add_argument(
@@ -56,36 +70,10 @@ def main():
     )
 
     detect_parser.add_argument(
-        "--agnostic",
-        action="store_true",
-        help="Run model in agnostic mode.",
-    )
-
-    detect_parser.add_argument(
-        "--multi_label",
-        action="store_true",
-        help="Run model in multi-label mode.",
-    )
-
-    detect_parser.add_argument(
         "--classes",
         nargs="+",
         default=None,
         help="List of YOLO class indices to detect.",
-    )
-
-    detect_parser.add_argument(
-        "--max_det",
-        type=int,
-        default=1000,
-        help="Maximum number of detections to return.",
-    )
-
-    detect_parser.add_argument(
-        "--device",
-        type=str,
-        default="0",
-        help="Inference device to use, e.g., 0, cpu, mps.",
     )
 
     detect_parser.add_argument(
@@ -116,13 +104,6 @@ def main():
     )
 
     detect_parser.add_argument("--table", type=str, help="Database table name.")
-
-    detect_parser.add_argument(
-        "--bands",
-        nargs="*",
-        default=False,
-        help="1-indexed bands to use to use for inference.",
-    )
 
     detect_parser.add_argument(
         "--encode_chip",

@@ -154,7 +154,7 @@ def box_iou(boxes1, boxes2):
 
 # need nms to handle oriented bboxes eventually
 def non_max_suppression(
-    boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=300
+    boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=None
 ):
     """
     Non-Maximum Suppression NMS on detection boxes.
@@ -209,7 +209,7 @@ def non_max_suppression(
 
     nms_boxes = torch.cat(nms_boxes, dim=0)
 
-    if nms_boxes.shape[0] > max_detections:
+    if max_detections and (nms_boxes.shape[0] > max_detections):
         nms_boxes = nms_boxes[:max_detections]
 
     return nms_boxes
@@ -218,15 +218,16 @@ def non_max_suppression(
 def detect_image(
     image_path,
     model,
+    device=0,
     window_size=1024,
     stride=0.05,
     bands=None,
     confidence=0.5,
     iou=0.5,
-    max_detections=10000,
+    classes=None,
+    max_detections=None,
     half=True,
     xyxy=True,
-    device=0,
 ):
     """
     Run inference on single image.
@@ -234,18 +235,18 @@ def detect_image(
     Args:
         image_path (str): Path to image for inference
         model (): Loaded YOLO model
+        device (int, str): Device to run inference on
         window_size (int): Sliding window size
         stride (float): Sliding window overlap in x & y directions
         bands (List[int]): 1-indexed list of 3 band numbers if using MSI imagery
         confidence (float): Confidence threshold
         iou (float): NMS IoU threshold
+        classes (List[int]): Filter detects to a set of class ids. Only those detections will be returned
         max_detections (int): Maximum number of detections allowed per image.
         half (bool): Use FP16 half-precision inference
         xyxy (bool): Return detection bboxes in xyxy format (x1, y1, x2, y2 aka upper left/lower right)
-
-        device (int, str): Device to run inference on
     Returns:
-
+        detections (torch.Tensor): Detections tensor
     """
 
     image = gdal.Open(image_path)
@@ -287,6 +288,7 @@ def detect_image(
             imgsz=window_size,
             conf=confidence,
             iou=iou,
+            classes=classes,
             verbose=False,
             half=half,
             device=device,
@@ -302,10 +304,10 @@ def detect_image(
         boxes[:, 2] += xoff  # x2
         boxes[:, 3] += yoff  # y2
 
-        confs = results[0].boxes.conf
-        classes = results[0].boxes.cls
+        confs = results[0].boxes.conf  # confidences
+        cls = results[0].boxes.cls  # classes
 
-        detects = torch.cat([boxes, confs.unsqueeze(1), classes.unsqueeze(1)], dim=1)
+        detects = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
         tensor_list.append(detects)
         detects = None
 
@@ -402,6 +404,8 @@ def detect_image(
             [ul_lon, ul_lat, ur_lon, ur_lat, lr_lon, lr_lat, ll_lon, ll_lat], dim=1
         )
 
+    # if encode_chip place here, use global xyxy to grab pixels from image
+
     detects = torch.cat([nms_detects, geodetections], dim=1)
 
     return detects, class_map
@@ -410,13 +414,16 @@ def detect_image(
 def detect(
     src,
     model_path,
+    device=0,
     window_size=1024,
     stride=0.05,
+    bands=None,
     confidence=0.5,
-    max_detections=10000,
+    iou=0.5,
+    classes=None,
+    max_detections=None,
     half=True,
     xyxy=True,
-    device=0,
 ):
     """
     Main function for detection inference.
@@ -435,13 +442,16 @@ def detect(
             detects = detect_image(
                 image_path,
                 model,
+                device=device,
                 window_size=window_size,
                 stride=stride,
+                bands=bands,
                 confidence=confidence,
+                iou=iou,
+                classes=classes,
                 max_detections=max_detections,
                 half=half,
                 xyxy=xyxy,
-                device=device,
             )
             # need to export detections here (postgres/gis, geojson, parquet)...
             # for db, need to make connection to db, ensure table exists, if not create it, add primary key
