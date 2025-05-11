@@ -12,6 +12,8 @@ Assumes GDAL is already installed globally
 ## TODO:
 - Add detection export (postgres/gis, geojson, parquet, bytesio?)
     - Add database connection support, check if export table exists, create if not, add Primary Key
+    - Example fields: x1, y1, x2, y2, confidence, class, label, ul_lon, ul_lat, lr_lon, lr_lat, image_name, image_datetime, model_name, processed_datetime, detect_chip, global_id (PK)
+        - potentially other bbox coorner coords and rotation for OBB model
 - Add oriented bounding box support (NMS needs to handle rotation as well as OBB boxes vs axis aligned)
 - Add typing support where not already
 - Add optional base64 encoded detection chip export
