@@ -6,6 +6,7 @@ from tqdm import tqdm
 from PIL import Image
 from numba import jit
 from osgeo import gdal
+from pyproj import CRS
 from ultralytics import YOLO
 from typing import List, Tuple, Union
 
@@ -154,7 +155,7 @@ def box_iou(boxes1, boxes2):
 
 # need nms to handle oriented bboxes eventually
 def non_max_suppression(
-    boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=None
+    boxes, conf_threshold=0.5, iou_threshold=0.3, max_detections=100000
 ):
     """
     Non-Maximum Suppression NMS on detection boxes.
@@ -220,12 +221,12 @@ def detect_image(
     model,
     device=0,
     window_size=1024,
-    stride=0.05,
+    stride=0.1,
     bands=None,
-    confidence=0.5,
+    confidence=0.3,
     iou=0.5,
     classes=None,
-    max_detections=None,
+    max_detections=100000,
     half=True,
     xyxy=True,
 ):
@@ -250,10 +251,36 @@ def detect_image(
     """
 
     image = gdal.Open(image_path)
+    image_id = os.path.basename(image).split(".")[0]
     width = image.RasterXSize
     height = image.RasterYSize
     band_count = image.RasterCount
     src_geotransform = image.GetGeoTransform()
+
+    metadata = image.GetMetadata()
+
+    if "TIFFTAG_DATETIME" in metadata.keys():
+        date_time = metadata["TIFFTAG_DATETIME"]
+        image_date = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
+    else:
+        image_date = None
+
+    try:
+        wkt_string = gdal.Info(image, format="json")["gcps"]["coordinateSystem"]["wkt"]
+        crs = CRS.from_wkt(wkt_string)
+        epsg = crs.to_epsg()
+    except ValueError as e:
+        epsg = 4326
+
+    # image metadata, need to pass this through the return to join with detections results downstream
+    metadata_dict = {
+        "image_id": image_id,
+        "image_datetime_utc": image_date,
+        "width": width,
+        "height": height,
+        "geotransform": str(src_geotransform),
+        "epsg": epsg,
+    }
 
     windows = make_windows(
         src_geotransform,
@@ -294,8 +321,6 @@ def detect_image(
             device=device,
         )
 
-        class_map = results[0].names
-
         boxes = results[0].boxes.xyxy.clone()
         # if OBB need to get the OBB boxes
 
@@ -311,7 +336,6 @@ def detect_image(
         tensor_list.append(detects)
         detects = None
 
-    # """put second step for global NMS here..."""
     detects = torch.cat(tensor_list, dim=0)
 
     nms_detects = non_max_suppression(
@@ -408,7 +432,7 @@ def detect_image(
 
     detects = torch.cat([nms_detects, geodetections], dim=1)
 
-    return detects, class_map
+    return detects
 
 
 def detect(
@@ -416,12 +440,12 @@ def detect(
     model_path,
     device=0,
     window_size=1024,
-    stride=0.05,
+    stride=0.1,
     bands=None,
     confidence=0.5,
-    iou=0.5,
+    iou=0.3,
     classes=None,
-    max_detections=None,
+    max_detections=100000,
     half=True,
     xyxy=True,
 ):
@@ -433,6 +457,9 @@ def detect(
 
     model = YOLO(model_path, task="detect")
     model_name = os.path.basename(model_path).split(".")[0]
+
+    # need to join this to detection results to get class label names
+    class_map = model.names
 
     with tqdm(total=len(src_images), unit="image") as progress_bar:
         for image_path in src_images:
