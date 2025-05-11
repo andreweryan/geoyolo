@@ -4,6 +4,7 @@ A high performance object detection inference engine for arbitrarily large satel
 ## Installation
 
 GitHub: Clone the repo & run `sh install.sh`
+
 PyPi: `pip install geoyolo`
 
 Assumes GDAL is already installed globally
