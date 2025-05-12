@@ -108,7 +108,7 @@ def box_iou(boxes1, boxes2):
 
 
 # need nms to handle oriented bboxes eventually
-def nms(boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=50000):
+def nms(boxes, conf_threshold=0.05, iou_threshold=0.3, max_detections=100000):
     """
     Non-Maximum Suppression NMS on detection boxes.
 
@@ -137,8 +137,8 @@ def nms(boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=50000):
     keep_indices = batched_nms(box_coords, scores, classes, iou_threshold)
 
     # Keep top detections if needed
-    if max_detections:
-        keep_indices = keep_indices[:max_detections]
+    # if max_detections:
+    #     keep_indices = keep_indices[:max_detections]
 
     return boxes[keep_indices]
 
@@ -240,10 +240,11 @@ def detect_image(
             imgsz=window_size,
             conf=confidence,
             iou=iou,
+            max_det=max_detections,
             classes=classes,
-            verbose=False,
             half=half,
             device=device,
+            verbose=False,
         )
 
         boxes = results[0].boxes.xyxy.clone()
@@ -257,20 +258,17 @@ def detect_image(
         confs = results[0].boxes.conf  # confidences
         cls = results[0].boxes.cls  # classes
 
-        detects = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
-        tensor_list.append(detects)
-        detects = None
+        detections = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
+        tensor_list.append(detections)
 
-    detects = torch.cat(tensor_list, dim=0)
+    merged_detections = torch.cat(tensor_list, dim=0)
 
     nms_detects = nms(
-        detects,
+        merged_detections,
         conf_threshold=confidence,
         iou_threshold=iou,
         max_detections=max_detections,
     )
-
-    detects = None
 
     if xyxy:
         """upper-left lon/lat (x1, y1)"""
