@@ -178,7 +178,7 @@ def detect_image(
     """
 
     image = gdal.Open(image_path)
-    image_id = os.path.basename(image).split(".")[0]
+    image_id = os.path.basename(image_path).split(".")[0]
     width = image.RasterXSize
     height = image.RasterYSize
     band_count = image.RasterCount
@@ -192,11 +192,11 @@ def detect_image(
     else:
         image_date = None
 
-    try:
+    if "gcps" in gdal.Info(image, format="json").keys():
         wkt_string = gdal.Info(image, format="json")["gcps"]["coordinateSystem"]["wkt"]
         crs = CRS.from_wkt(wkt_string)
         epsg = crs.to_epsg()
-    except ValueError as e:
+    else:
         epsg = 4326
 
     # image metadata, need to pass this through the return to join with detections results downstream
@@ -225,17 +225,15 @@ def detect_image(
         xsize = int(window[6])
         ysize = int(window[7])
 
+        window_array = image.ReadAsArray(xoff, yoff, xsize, ysize)
+
         if band_count == 1:  # if single band, convert to 3 band
-            window_array = Image.fromarray(
-                np.rollaxis(
-                    np.array([image.ReadAsArray(xoff, yoff, xsize, ysize)] * 3), 0, 3
-                )
-            )
+            window_array = np.array([window_array] * 3)
+
         if bands:  # select bands to place into R, G, B channels
-            window_array = Image.fromarray(
-                np.rollaxis(image.ReadAsArray(xoff, yoff, xsize, ysize)[bands], 0, 3)
-            )
-            # window_array = Image.fromarray(np.rollaxis(image.ReadAsArray(0, 0, 1024, 1024), 0, 3))
+            window_array = window_array[bands]
+
+        window_array = np.rollaxis(window_array, 0, 3)
 
         results = model(
             window_array,
@@ -383,6 +381,7 @@ def detect(
     src_images = source_images(src=src)
 
     model = YOLO(model_path, task="detect")
+
     model_name = os.path.basename(model_path).split(".")[0]
 
     # need to join this to detection results to get class label names
