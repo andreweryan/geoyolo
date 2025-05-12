@@ -7,6 +7,7 @@ from PIL import Image
 from osgeo import gdal
 from pyproj import CRS
 from ultralytics import YOLO
+from torchvision.ops import batched_nms
 from typing import List, Tuple, Union
 
 from geoyolo.core.utils import source_images
@@ -107,9 +108,7 @@ def box_iou(boxes1, boxes2):
 
 
 # need nms to handle oriented bboxes eventually
-def non_max_suppression(
-    boxes, conf_threshold=0.5, iou_threshold=0.3, max_detections=100000
-):
+def nms(boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=50000):
     """
     Non-Maximum Suppression NMS on detection boxes.
 
@@ -122,51 +121,26 @@ def non_max_suppression(
     Returns:
         nms_boxes (torch.Tensor): Filtered tensor containing only the kept boxes
     """
-    # Filter out boxes with confidence below threshold
+
     mask = boxes[:, 4] >= conf_threshold
     boxes = boxes[mask]
 
     if boxes.shape[0] == 0:
         return torch.zeros((0, 6), device=boxes.device)
 
-    # Sort boxes by confidence (descending)
-    _, indices = torch.sort(boxes[:, 4], descending=True)
-    boxes = boxes[indices]
+    # Extract box coordinates, scores, and class labels
+    box_coords = boxes[:, :4]
+    scores = boxes[:, 4]
+    classes = boxes[:, 5]
 
-    # Apply NMS for each class separately
-    unique_classes = boxes[:, 5].unique()
-    nms_boxes = []
+    # Apply class-aware NMS
+    keep_indices = batched_nms(box_coords, scores, classes, iou_threshold)
 
-    for cls in unique_classes:
-        # Get boxes of this class
-        cls_mask = boxes[:, 5] == cls
-        cls_boxes = boxes[cls_mask]
+    # Keep top detections if needed
+    if max_detections:
+        keep_indices = keep_indices[:max_detections]
 
-        # Continue while we still have boxes
-        while cls_boxes.shape[0] > 0:
-            # Take the box with highest confidence
-            nms_boxes.append(cls_boxes[0:1])
-
-            # If only one box left, we're done with this class
-            if cls_boxes.shape[0] == 1:
-                break
-
-            # Calculate IoU of the kept box with all remaining boxes
-            ious = box_iou(cls_boxes[0:1, :4], cls_boxes[1:, :4]).squeeze(0)
-
-            # Filter out boxes with IoU >= threshold
-            iou_mask = ious < iou_threshold
-            cls_boxes = cls_boxes[1:][iou_mask]
-
-    if not nms_boxes:
-        return torch.zeros((0, 6), device=boxes.device)
-
-    nms_boxes = torch.cat(nms_boxes, dim=0)
-
-    if max_detections and (nms_boxes.shape[0] > max_detections):
-        nms_boxes = nms_boxes[:max_detections]
-
-    return nms_boxes
+    return boxes[keep_indices]
 
 
 def detect_image(
@@ -291,7 +265,7 @@ def detect_image(
 
     detects = torch.cat(tensor_list, dim=0)
 
-    nms_detects = non_max_suppression(
+    nms_detects = nms(
         detects,
         conf_threshold=confidence,
         iou_threshold=iou,
