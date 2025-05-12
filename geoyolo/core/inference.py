@@ -4,7 +4,6 @@ import datetime
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
-from numba import jit
 from osgeo import gdal
 from pyproj import CRS
 from ultralytics import YOLO
@@ -15,7 +14,6 @@ from geoyolo.core.utils import source_images
 gdal.UseExceptions()
 
 
-@jit(nopython=True)
 def make_windows(
     src_geotransform: Tuple[float],
     src_width: int,
@@ -36,94 +34,49 @@ def make_windows(
     Return:
         geoinfo_list (List[List[Union[float, int]]]): List of lists containing window geotransform and bounds information for all image windows
     """
-    geotransform = list(src_geotransform)
 
-    geoinfo_list = list()
+    gt = np.array(src_geotransform)
 
-    for i in range(0, src_width, int(window_size * (1 - stride))):
-        if i + window_size > src_width:
-            i = src_width - window_size
+    step = int(window_size * (1 - stride))
+    xoffs = np.arange(0, src_width - window_size + 1, step)
+    yoffs = np.arange(0, src_height - window_size + 1, step)
 
-        for j in range(0, src_height, int(window_size * (1 - stride))):
-            if j + window_size > src_height:
-                j = src_height - window_size
+    if xoffs[-1] + window_size < src_width:
+        xoffs = np.append(xoffs, src_width - window_size)
+    if yoffs[-1] + window_size < src_height:
+        yoffs = np.append(yoffs, src_height - window_size)
 
-            ulx = (
-                geotransform[1] * i
-                + geotransform[2] * j
-                + geotransform[1] * 0.5
-                + geotransform[2] * 0.5
-                + geotransform[0]
-            )
-            uly = (
-                geotransform[4] * i
-                + geotransform[5] * j
-                + geotransform[4] * 0.5
-                + geotransform[5] * 0.5
-                + geotransform[3]
-            )
+    x, y = np.meshgrid(xoffs, yoffs, indexing="xy")
 
-            window_geotransform = [
-                ulx,
-                geotransform[1],
-                geotransform[2],
-                uly,
-                geotransform[4],
-                geotransform[5],
-            ]
+    x_flat = x.ravel()
+    y_flat = y.ravel()
 
-            lrx = ulx + (window_size * window_geotransform[1])
-            lry = uly + (window_size * window_geotransform[5])
+    x_c = x_flat + 0.5
+    y_c = y_flat + 0.5
 
-            geoinfo = [ulx, lry, lrx, uly, i, j, window_size, window_size]
+    ulx = gt[1] * x_c + gt[2] * y_c + gt[0]
+    uly = gt[4] * x_c + gt[5] * y_c + gt[3]
 
-            geoinfo_list.append(geoinfo)
+    lrx = ulx + window_size * gt[1]
+    lry = uly + window_size * gt[5]
+
+    geoinfo_array = np.stack(
+        [
+            ulx,
+            lry,
+            lrx,
+            uly,
+            x_flat,
+            y_flat,
+            np.full_like(x_flat, window_size),
+            np.full_like(y_flat, window_size),
+        ],
+        axis=1,
+    )
+
+    geoinfo_list = geoinfo_array.tolist()
 
     return geoinfo_list
-
-
-def window_transform(
-    src_geotransform: Tuple[float, float, float, float, float, float, float, float],
-    xoff: int = 0,
-    yoff: int = 0,
-) -> List[Union[float, int]]:
-    """
-    Create Affine GeoTransform for sliding window
-
-    Args:
-        xoff (int): Column origin coordinate
-        yoff (int): Row origin Coordinate
-        xsize (int): Width of window, number of columns
-        ysize (int): Height of window, number of rows
-    Return:
-        window_geotransform (List[float]): Geotransform for a window of an image
-    """
-
-    x = (
-        src_geotransform[1] * xoff
-        + src_geotransform[2] * yoff
-        + src_geotransform[1] * 0.5
-        + src_geotransform[2] * 0.5
-        + src_geotransform[0]
-    )
-    y = (
-        src_geotransform[4] * xoff
-        + src_geotransform[5] * yoff
-        + src_geotransform[4] * 0.5
-        + src_geotransform[5] * 0.5
-        + src_geotransform[3]
-    )
-
-    window_geotransform = [
-        x,
-        src_geotransform[1],
-        src_geotransform[2],
-        y,
-        src_geotransform[4],
-        src_geotransform[5],
-    ]
-
-    return window_geotransform
 
 
 def box_iou(boxes1, boxes2):
