@@ -108,7 +108,7 @@ def box_iou(boxes1, boxes2):
 
 
 # need nms to handle oriented bboxes eventually
-def nms(boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=50000):
+def nms(boxes, conf_threshold=0.05, iou_threshold=0.3, max_detections=100000):
     """
     Non-Maximum Suppression NMS on detection boxes.
 
@@ -137,8 +137,8 @@ def nms(boxes, conf_threshold=0.5, iou_threshold=0.5, max_detections=50000):
     keep_indices = batched_nms(box_coords, scores, classes, iou_threshold)
 
     # Keep top detections if needed
-    if max_detections:
-        keep_indices = keep_indices[:max_detections]
+    # if max_detections:
+    #     keep_indices = keep_indices[:max_detections]
 
     return boxes[keep_indices]
 
@@ -178,7 +178,7 @@ def detect_image(
     """
 
     image = gdal.Open(image_path)
-    image_id = os.path.basename(image).split(".")[0]
+    image_id = os.path.basename(image_path).split(".")[0]
     width = image.RasterXSize
     height = image.RasterYSize
     band_count = image.RasterCount
@@ -230,27 +230,26 @@ def detect_image(
         xsize = int(window[6])
         ysize = int(window[7])
 
+        window_array = image.ReadAsArray(xoff, yoff, xsize, ysize)
+
         if band_count == 1:  # if single band, convert to 3 band
-            window_array = Image.fromarray(
-                np.rollaxis(
-                    np.array([image.ReadAsArray(xoff, yoff, xsize, ysize)] * 3), 0, 3
-                )
-            )
+            window_array = np.array([window_array] * 3)
+
         if bands:  # select bands to place into R, G, B channels
-            window_array = Image.fromarray(
-                np.rollaxis(image.ReadAsArray(xoff, yoff, xsize, ysize)[bands], 0, 3)
-            )
-            # window_array = Image.fromarray(np.rollaxis(image.ReadAsArray(0, 0, 1024, 1024), 0, 3))
+            window_array = window_array[bands]
+
+        window_array = np.rollaxis(window_array, 0, 3)
 
         results = model(
             window_array,
             imgsz=window_size,
             conf=confidence,
             iou=iou,
+            max_det=max_detections,
             classes=classes,
-            verbose=False,
             half=half,
             device=device,
+            verbose=False,
         )
 
         boxes = results[0].boxes.xyxy.clone()
@@ -264,20 +263,17 @@ def detect_image(
         confs = results[0].boxes.conf  # confidences
         cls = results[0].boxes.cls  # classes
 
-        detects = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
-        tensor_list.append(detects)
-        detects = None
+        detections = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
+        tensor_list.append(detections)
 
-    detects = torch.cat(tensor_list, dim=0)
+    merged_detections = torch.cat(tensor_list, dim=0)
 
     nms_detects = nms(
-        detects,
+        merged_detections,
         conf_threshold=confidence,
         iou_threshold=iou,
         max_detections=max_detections,
     )
-
-    detects = None
 
     if xyxy:
         """upper-left lon/lat (x1, y1)"""
@@ -388,6 +384,7 @@ def detect(
     src_images = source_images(src=src)
 
     model = YOLO(model_path, task="detect")
+
     model_name = os.path.basename(model_path).split(".")[0]
 
     # need to join this to detection results to get class label names
