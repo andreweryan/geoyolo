@@ -182,22 +182,27 @@ def detect_image(
     width = image.RasterXSize
     height = image.RasterYSize
     band_count = image.RasterCount
+    info = gdal.Info(image, format="json")
     src_geotransform = image.GetGeoTransform()
-
+    gcps = image.GetGCPs()
     metadata = image.GetMetadata()
+
+    coord_system = info["coordinateSystem"]["wkt"]
+
+    if coord_system:
+        crs = CRS.from_wkt(coord_system)
+        epsg = crs.to_epsg()
+    else:
+        epsg = 4326
+
+    if src_geotransform[0] == 0 and len(gcps) > 0:
+        src_geotransform = gdal.GCPsToGeoTransform(gcps)
 
     if "TIFFTAG_DATETIME" in metadata.keys():
         date_time = metadata["TIFFTAG_DATETIME"]
         image_date = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
     else:
         image_date = None
-
-    try:
-        wkt_string = gdal.Info(image, format="json")["gcps"]["coordinateSystem"]["wkt"]
-        crs = CRS.from_wkt(wkt_string)
-        epsg = crs.to_epsg()
-    except ValueError as e:
-        epsg = 4326
 
     # image metadata, need to pass this through the return to join with detections results downstream
     metadata_dict = {
