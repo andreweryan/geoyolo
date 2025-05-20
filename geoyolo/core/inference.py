@@ -6,6 +6,8 @@ from tqdm import tqdm
 from PIL import Image
 from osgeo import gdal
 from pyproj import CRS
+import geopandas as gpd
+from shapely.geometry import Polygon
 from ultralytics import YOLO
 from torchvision.ops import batched_nms
 from typing import List, Tuple, Union
@@ -156,6 +158,8 @@ def detect_image(
     max_detections=100000,
     half=True,
     xyxy=True,
+    export="geojson",
+    export_dir=None,
 ):
     """
     Run inference on single image.
@@ -173,6 +177,8 @@ def detect_image(
         max_detections (int): Maximum number of detections allowed per image.
         half (bool): Use FP16 half-precision inference
         xyxy (bool): Return detection bboxes in xyxy format (x1, y1, x2, y2 aka upper left/lower right)
+        export (str): Type of export, e.g. geojson, parquet, database
+        export_dir (Str): Path to directory for flat file export
     Returns:
         detections (torch.Tensor): Detections tensor
     """
@@ -363,7 +369,80 @@ def detect_image(
 
     detects = torch.cat([nms_detects, geodetections], dim=1)
 
-    return detects
+    # need to export detections here (postgres/gis, geojson, parquet)...
+    # for db, need to make connection to db, ensure table exists, if not create it, add primary key
+    data = []
+
+    header = ["x1", "y1", "x2", "y2", "confidence", "class"]
+
+    if xyxy:
+        header = header + ["ul_lon", "ul_lat", "lr_lon", "lr_lat", "geom"]
+        for box in detects.cpu().numpy():
+            x1, y1, x2, y2, conf, cls, ul_lon, ul_lat, lr_lon, lr_lat = box
+            ur_lon, ur_lat = lr_lon, ul_lat
+            ll_lon, ll_lat = ul_lon, lr_lat
+
+            coords = [
+                (ul_lon, ul_lat),
+                (ur_lon, ur_lat),
+                (lr_lon, lr_lat),
+                (ll_lon, ll_lat),
+                (ul_lon, ul_lat),  # close the polygon
+            ]
+            geom = Polygon(coords)
+            data.append(
+                [x1, y1, x2, y2, conf, int(cls), ul_lon, ul_lat, lr_lon, lr_lat, geom]
+            )
+    else:
+        header = header + [
+            "ul_lon",
+            "ul_lat",
+            "ur_lon",
+            "ur_lat",
+            "lr_lon",
+            "lr_lat",
+            "ll_lon",
+            "ll_lat",
+            "geom",
+        ]
+        (
+            x1,
+            y1,
+            x2,
+            y2,
+            conf,
+            cls,
+            ul_lon,
+            ul_lat,
+            ur_lon,
+            ur_lat,
+            lr_lon,
+            lr_lat,
+            ll_lon,
+            ll_lat,
+        ) = box
+        coords = [
+            (ul_lon, ul_lat),
+            (ur_lon, ur_lat),
+            (lr_lon, lr_lat),
+            (ll_lon, ll_lat),
+            (ul_lon, ul_lat),  # close the polygon
+        ]
+
+        geom = Polygon(coords)
+        data.append(
+            [x1, y1, x2, y2, conf, int(cls), ul_lon, ul_lat, lr_lon, lr_lat, geom]
+        )
+
+    gdf = gpd.GeoDataFrame(data, columns=header, geometry="geom", crs=epsg)
+
+    if export_dir:
+        os.makedirs(export_dir, exist_ok=True)
+
+    if export == "geojson":
+        gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
+    print(gdf.head())
+    return gdf
 
 
 def detect(
@@ -379,6 +458,8 @@ def detect(
     max_detections=100000,
     half=True,
     xyxy=True,
+    export="geojson",
+    export_dir=None,
 ):
     """
     Main function for detection inference.
@@ -411,13 +492,8 @@ def detect(
                 max_detections=max_detections,
                 half=half,
                 xyxy=xyxy,
+                export=export,
+                export_dir=export_dir,
             )
-            # need to export detections here (postgres/gis, geojson, parquet)...
-            # for db, need to make connection to db, ensure table exists, if not create it, add primary key
-            # header = ["x1", "y1", "x2", "y2", "confidence", "class"]
-            # if xyxy:
-            #     header + ["ul_lon", "ul_lat", "lr_lon", "lr_lat"]
-            # else:
-            #     header + ["ul_lon", "ul_lat", "ur_lon", "ur_lat", "lr_lon", "lr_lat", "ll_lon", "ll_lat"]
 
             progress_bar.update(1)
