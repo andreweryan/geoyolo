@@ -474,9 +474,6 @@ def detect_image(
     if export == "geojson":
         gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
 
-    print(gdf.head())
-    print(gdf.iloc[999])
-
     return gdf
 
 
