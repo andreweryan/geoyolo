@@ -214,20 +214,6 @@ def detect_image(
     else:
         image_datetime = None
 
-    # image metadata, need to pass this through the return to join with detections results downstream
-    metadata_dict = {
-        "image_id": image_id,
-        "image_datetime_utc": image_datetime,
-        "width": width,
-        "height": height,
-        "geotransform": str(src_geotransform),
-        "epsg": epsg,
-    }
-
-    # need to join this to detection results to get class label names
-    class_map = pd.DataFrame.from_dict(model.names, orient="index", columns=["label"])
-    class_map.reset_index(inplace=True)
-
     windows = make_windows(
         src_geotransform,
         width,
@@ -458,11 +444,17 @@ def detect_image(
 
     gdf = gpd.GeoDataFrame(data, columns=header, geometry="geom", crs=epsg)
 
-    if export_dir:
-        os.makedirs(export_dir, exist_ok=True)
+    metadata_dict = {
+        "image_id": image_id,
+        "image_datetime_utc": image_datetime,
+        "width": width,
+        "height": height,
+        "geotransform": str(src_geotransform),
+        "epsg": epsg,
+    }
 
-    if export == "geojson":
-        gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
+    class_map = pd.DataFrame.from_dict(model.names, orient="index", columns=["label"])
+    class_map.reset_index(inplace=True)
 
     gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
     gdf.drop(columns="index", inplace=True)
@@ -475,6 +467,12 @@ def detect_image(
     cols.remove("label")
     cols.insert(class_idx + 1, "label")
     gdf = gdf[cols]
+
+    if export_dir:
+        os.makedirs(export_dir, exist_ok=True)
+
+    if export == "geojson":
+        gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
 
     print(gdf.head())
     print(gdf.iloc[999])
