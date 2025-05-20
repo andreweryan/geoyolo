@@ -187,8 +187,10 @@ def detect_image(
     gcps = image.GetGCPs()
     metadata = image.GetMetadata()
 
+    print(info["coordinateSystem"]["wkt"])
+
     try:
-        coord_system = info["coodinateSystem"]["wkt"]
+        coord_system = info["coordinateSystem"]["wkt"]
     except ValueError as e:
         coord_system = info["gcps"]["coordinateSyste"]["wkt"]
 
