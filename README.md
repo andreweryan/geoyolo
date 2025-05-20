@@ -1,5 +1,5 @@
 # geoyolo
-A high performance object detection inference engine for arbitrarily large satellite imagery
+A high performance object detection inference engine for arbitrarily large satellite images
 
 ## Installation
 
