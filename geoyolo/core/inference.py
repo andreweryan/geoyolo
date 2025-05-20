@@ -187,7 +187,10 @@ def detect_image(
     gcps = image.GetGCPs()
     metadata = image.GetMetadata()
 
-    coord_system = info["coordinateSystem"]["wkt"]
+    try:
+        coord_system = info["coodinateSystem"]["wkt"]
+    except ValueError as e:
+        coord_system = info["gcps"]["coordinateSyste"]["wkt"]
 
     if coord_system:
         crs = CRS.from_wkt(coord_system)
@@ -200,14 +203,14 @@ def detect_image(
 
     if "TIFFTAG_DATETIME" in metadata.keys():
         date_time = metadata["TIFFTAG_DATETIME"]
-        image_date = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
+        image_datetime = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
     else:
-        image_date = None
+        image_datetime = None
 
     # image metadata, need to pass this through the return to join with detections results downstream
     metadata_dict = {
         "image_id": image_id,
-        "image_datetime_utc": image_date,
+        "image_datetime_utc": image_datetime,
         "width": width,
         "height": height,
         "geotransform": str(src_geotransform),
