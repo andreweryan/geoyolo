@@ -2,6 +2,7 @@ import os
 import torch
 import datetime
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from PIL import Image
 from osgeo import gdal
@@ -223,6 +224,10 @@ def detect_image(
         "epsg": epsg,
     }
 
+    # need to join this to detection results to get class label names
+    class_map = pd.DataFrame.from_dict(model.names, orient="index", columns=["label"])
+    class_map.reset_index(inplace=True)
+
     windows = make_windows(
         src_geotransform,
         width,
@@ -311,7 +316,7 @@ def detect_image(
 
         geodetections = torch.stack([ul_lon, ul_lat, lr_lon, lr_lat], dim=1)
 
-    else:  # xyxyxyxy
+    else:  # xyxyxyxy will need this + rotation for OBB detector models
         """upper-left lon/lat (x1, y1)"""
         ul_lon = (
             src_geotransform[0]
@@ -387,7 +392,7 @@ def detect_image(
                 (ur_lon, ur_lat),
                 (lr_lon, lr_lat),
                 (ll_lon, ll_lat),
-                (ul_lon, ul_lat),  # close the polygon
+                (ul_lon, ul_lat),
             ]
             geom = Polygon(coords)
             data.append(
@@ -405,34 +410,51 @@ def detect_image(
             "ll_lat",
             "geom",
         ]
-        (
-            x1,
-            y1,
-            x2,
-            y2,
-            conf,
-            cls,
-            ul_lon,
-            ul_lat,
-            ur_lon,
-            ur_lat,
-            lr_lon,
-            lr_lat,
-            ll_lon,
-            ll_lat,
-        ) = box
-        coords = [
-            (ul_lon, ul_lat),
-            (ur_lon, ur_lat),
-            (lr_lon, lr_lat),
-            (ll_lon, ll_lat),
-            (ul_lon, ul_lat),  # close the polygon
-        ]
+        for box in detects.cpu().numpy():
+            (
+                x1,
+                y1,
+                x2,
+                y2,
+                conf,
+                cls,
+                ul_lon,
+                ul_lat,
+                ur_lon,
+                ur_lat,
+                lr_lon,
+                lr_lat,
+                ll_lon,
+                ll_lat,
+            ) = box
+            coords = [
+                (ul_lon, ul_lat),
+                (ur_lon, ur_lat),
+                (lr_lon, lr_lat),
+                (ll_lon, ll_lat),
+                (ul_lon, ul_lat),
+            ]
 
-        geom = Polygon(coords)
-        data.append(
-            [x1, y1, x2, y2, conf, int(cls), ul_lon, ul_lat, lr_lon, lr_lat, geom]
-        )
+            geom = Polygon(coords)
+            data.append(
+                [
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    conf,
+                    int(cls),
+                    ul_lon,
+                    ul_lat,
+                    ur_lon,
+                    ur_lat,
+                    lr_lon,
+                    lr_lat,
+                    ll_lon,
+                    ll_lat,
+                    geom,
+                ]
+            )
 
     gdf = gpd.GeoDataFrame(data, columns=header, geometry="geom", crs=epsg)
 
@@ -441,7 +463,22 @@ def detect_image(
 
     if export == "geojson":
         gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
+
+    gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
+    gdf.drop(columns="index", inplace=True)
+
+    gdf = gdf.assign(**metadata_dict)
+
+    # rearranging columns so class and label are next to one another
+    cols = list(gdf.columns)
+    class_idx = cols.index("class")
+    cols.remove("label")
+    cols.insert(class_idx + 1, "label")
+    gdf = gdf[cols]
+
     print(gdf.head())
+    print(gdf.iloc[999])
+
     return gdf
 
 
@@ -470,9 +507,6 @@ def detect(
     model = YOLO(model_path, task="detect")
 
     model_name = os.path.basename(model_path).split(".")[0]
-
-    # need to join this to detection results to get class label names
-    class_map = model.names
 
     with tqdm(total=len(src_images), unit="image") as progress_bar:
         for image_path in src_images:
