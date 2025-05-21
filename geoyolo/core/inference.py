@@ -194,16 +194,14 @@ def detect_image(
     gcps = image.GetGCPs()
     metadata = image.GetMetadata()
 
-    try:
+    if "coordinateSystem" in info.keys():
         coord_system = info["coordinateSystem"]["wkt"]
-    except ValueError as e:
-        coord_system = info["gcps"]["coordinateSyste"]["wkt"]
-
-    if coord_system:
         crs = CRS.from_wkt(coord_system)
         epsg = crs.to_epsg()
-    else:
-        epsg = 4326
+    elif "coordinateSystem" in info["gcps"].keys():
+        coord_system = info["gcps"]["coordinateSystem"]["wkt"]
+        crs = CRS.from_wkt(coord_system)
+        epsg = crs.to_epsg()
 
     if src_geotransform[0] == 0 and len(gcps) > 0:
         src_geotransform = gdal.GCPsToGeoTransform(gcps)

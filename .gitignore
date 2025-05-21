@@ -30,3 +30,4 @@ README.pypi.md
 .mypy_cache
 test.py
 detects/
+test.py
