@@ -50,19 +50,15 @@ def make_windows(
     if yoffs[-1] + window_size < src_height:
         yoffs = np.append(yoffs, src_height - window_size)
 
-    x, y = np.meshgrid(xoffs, yoffs, indexing="xy")
+    x_grid, y_grid = np.meshgrid(xoffs, yoffs, indexing="xy")
+    x_flat = x_grid.ravel()
+    y_flat = y_grid.ravel()
 
-    x_flat = x.ravel()
-    y_flat = y.ravel()
+    ulx = gt[0] + x_flat * gt[1] + y_flat * gt[2]
+    uly = gt[3] + x_flat * gt[4] + y_flat * gt[5]
 
-    x_c = x_flat + 0.5
-    y_c = y_flat + 0.5
-
-    ulx = gt[1] * x_c + gt[2] * y_c + gt[0]
-    uly = gt[4] * x_c + gt[5] * y_c + gt[3]
-
-    lrx = ulx + window_size * gt[1]
-    lry = uly + window_size * gt[5]
+    lrx = gt[0] + (x_flat + window_size) * gt[1] + (y_flat + window_size) * gt[2]
+    lry = gt[3] + (x_flat + window_size) * gt[4] + (y_flat + window_size) * gt[5]
 
     geoinfo_array = np.stack(
         [
@@ -78,9 +74,7 @@ def make_windows(
         axis=1,
     )
 
-    geoinfo_list = geoinfo_array.tolist()
-
-    return geoinfo_list
+    return geoinfo_array.tolist()
 
 
 def box_iou(boxes1, boxes2):
