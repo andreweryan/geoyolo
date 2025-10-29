@@ -5,7 +5,7 @@ from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 
-from geoyolo.core.inference import detect
+from geoyolo.core.inference import detect_image
 
 
 def main():
@@ -97,21 +97,21 @@ def main():
         help="Detection export directory for file export.",
     )
 
-    detect_parser.add_argument(
-        "--database_creds",
-        type=str,
-        help="Path to JSON containing database information.",
-    )
+    # detect_parser.add_argument(
+    #     "--database_creds",
+    #     type=str,
+    #     help="Path to JSON containing database information.",
+    # )
 
-    detect_parser.add_argument("--table", type=str, help="Database table name.")
+    # detect_parser.add_argument("--table", type=str, help="Database table name.")
 
-    detect_parser.add_argument(
-        "--encode_chip",
-        action="store_true",
-        help="base64 encode detection chip",
-    )
+    # detect_parser.add_argument(
+    #     "--encode_chip",
+    #     action="store_true",
+    #     help="base64 encode detection chip",
+    # )
 
-    detect_parser.set_defaults(func=detect)
+    detect_parser.set_defaults(func=detect_image)
 
     args = parser.parse_args()
 

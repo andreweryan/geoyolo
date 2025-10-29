@@ -31,3 +31,9 @@ README.pypi.md
 test.py
 detects/
 test.py
+train.py
+export.py
+yolov8.yaml
+yolov11.yaml
+yolo_train.yaml
+yolov8shallow.yaml
