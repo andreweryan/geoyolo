@@ -63,10 +63,9 @@ def detect_image(
     all_boxes = []
     tile_batch = []
     offset_batch = []
-    count = 0
+
     while True:
         tile = tiler.get_tile()
-        count += 1
         if tile is None:
             # Process remaining tiles in batch
             if tile_batch:
@@ -185,7 +184,6 @@ def detect_image(
             gdf.to_file(
                 os.path.join(export_dir, f"{tiler.image_id}.geojson"), index=False
             )
-    print(count)
     return gdf
 
 
