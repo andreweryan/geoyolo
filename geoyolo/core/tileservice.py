@@ -42,11 +42,14 @@ class TilingService:
         if self.geotransform[0] == 0 and len(self.gcps) > 0:
             self.geotransform = gdal.GCPsToGeoTransform(self.gcps)
 
+        self.image_datetime: Optional[datetime.datetime] = None
         if "TIFFTAG_DATETIME" in self.metadata.keys():
             date_time = self.metadata["TIFFTAG_DATETIME"]
             self.image_datetime = datetime.datetime.strptime(
                 date_time, "%Y:%m:%d %H:%M:%S"
             )
+        else:
+            self.image_datetime = None
 
         self.window_size = window_size
         self.stride = stride
