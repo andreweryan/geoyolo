@@ -5,15 +5,24 @@ from threading import Thread
 import numpy as np
 from osgeo import gdal
 from pyproj import CRS
+from typing import List, Literal, Optional, Tuple, Union, Any
 
 gdal.UseExceptions()
 
 
 class TilingService:
-    def __init__(self, image_path, window_size=512, stride=0.2, max_queue=10):
+    def __init__(
+        self,
+        image_path: str,
+        bands: Optional[List[int]] = None,
+        window_size: int = 1024,
+        stride: float = 0.1,
+        max_queue: int = 10,
+    ):
         self.image_path = image_path
         self.image_id = os.path.basename(image_path).split(".")[0]
         self.image = gdal.Open(image_path, gdal.GA_ReadOnly)
+        self.bands = bands
         self.geotransform = self.image.GetGeoTransform()
         self.width = self.image.RasterXSize
         self.height = self.image.RasterYSize
@@ -35,14 +44,14 @@ class TilingService:
 
         if "TIFFTAG_DATETIME" in self.metadata.keys():
             date_time = self.metadata["TIFFTAG_DATETIME"]
-            self.image_datetime = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
-        else:
-            self.image_datetime = None
+            self.image_datetime = datetime.datetime.strptime(
+                date_time, "%Y:%m:%d %H:%M:%S"
+            )
 
         self.window_size = window_size
         self.stride = stride
 
-        self.queue = Queue(maxsize=max_queue)
+        self.queue: Queue[Any] = Queue(maxsize=max_queue)
         self.stop_signal = object()
 
         self.windows = self.make_windows()
@@ -71,9 +80,18 @@ class TilingService:
             )
             if arr is None:
                 continue
+
+            if self.band_count == 1:
+                arr = np.array([arr] * 3)
+
             if arr.ndim == 2:
                 arr = np.expand_dims(arr, axis=0)
+
+            if self.bands:
+                arr = arr[self.bands]
+
             arr = np.moveaxis(arr, 0, -1)  # HWC
+
             self.queue.put(
                 {
                     "array": arr,

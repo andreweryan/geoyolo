@@ -2,13 +2,19 @@ import os
 import torch
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 import geopandas as gpd
+from pathlib import Path
 from ultralytics import YOLO
 from shapely.geometry import Polygon
 from torchvision.ops import batched_nms
+from datetime import datetime, timezone
 from shapely import from_ragged_array, GeometryType
+from typing import List, Literal, Optional, Tuple, Union, Any
 
 from geoyolo.core.tileservice import TilingService
+from geoyolo.core.utils import source_images
+from geoyolo.core.database import connect, setup_db
 
 
 def nms(boxes, conf_threshold=0.05, iou_threshold=0.3):
@@ -31,20 +37,23 @@ def nms(boxes, conf_threshold=0.05, iou_threshold=0.3):
 
 
 def detect_image(
-    image_path,
-    model_path,
-    device=0,
-    window_size=1024,
-    stride=0.1,
-    bands=None,
-    confidence=0.3,
-    iou=0.5,
-    classes=None,
-    max_detections=100000,
-    half=True,
-    export="geojson",
-    export_dir=None,
-    batch_size=8,
+    src,
+    model,
+    model_name: str,
+    device: int = 0,
+    window_size: int = 1024,
+    stride: float = 0.1,
+    bands: Optional[List[int]] = None,
+    confidence: float = 0.3,
+    iou: float = 0.5,
+    classes: Optional[List[int]] = None,
+    max_detections: int = 100000,
+    half: bool = True,
+    export: Union[Literal["database", "geojson", "parquet"], str] = "geojson",
+    export_dir: str = os.path.join(Path.home(), "detects"),
+    database_connection=None,
+    table: Optional[str] = "detects",
+    batch_size: int = 8,
 ):
     """
     Run inference on single image with batched processing.
@@ -52,22 +61,23 @@ def detect_image(
     Args:
         batch_size (int): Number of tiles to process in parallel on GPU
     """
-    model = YOLO(model_path, task="detect")
-    model_name = os.path.basename(model_path).split(".")[0]
 
     tiler = TilingService(
-        image_path, window_size=window_size, stride=stride, max_queue=batch_size * 2
+        src,
+        bands=bands,
+        window_size=window_size,
+        stride=stride,
+        max_queue=batch_size * 2,
     )
     src_geotransform = tiler.geotransform
 
     all_boxes = []
-    tile_batch = []
-    offset_batch = []
+    tile_batch: List[np.ndarray] = []
+    offset_batch: List[Tuple[int, int]] = []
 
     while True:
         tile = tiler.get_tile()
         if tile is None:
-            # Process remaining tiles in batch
             if tile_batch:
                 all_boxes.extend(
                     _process_batch(
@@ -88,7 +98,6 @@ def detect_image(
         tile_batch.append(tile["array"])
         offset_batch.append((tile["xoff"], tile["yoff"]))
 
-        # Process when batch is full
         if len(tile_batch) >= batch_size:
             all_boxes.extend(
                 _process_batch(
@@ -108,19 +117,15 @@ def detect_image(
             offset_batch = []
 
     if len(all_boxes) == 0:
-        # No detections found
         return gpd.GeoDataFrame(
             columns=["confidence", "label", "geometry"], crs=tiler.epsg
         )
 
-    # Merge all detections
     merged_detections = torch.cat(all_boxes, dim=0)
     nms_detects = nms(merged_detections, conf_threshold=confidence, iou_threshold=iou)
 
-    # Move to CPU once for all coordinate calculations
     detects_cpu = nms_detects.cpu().numpy()
 
-    # Vectorized coordinate transformation
     x1, y1, x2, y2 = (
         detects_cpu[:, 0],
         detects_cpu[:, 1],
@@ -136,7 +141,6 @@ def detect_image(
     lr_lon = gt[0] + x2 * gt[1] + y2 * gt[2]
     lr_lat = gt[3] + x2 * gt[4] + y2 * gt[5]
 
-    # Create polygon coordinates (N, 5, 2)
     coords = np.stack(
         [
             np.column_stack([ul_lon, ul_lat]),
@@ -148,7 +152,6 @@ def detect_image(
         axis=1,
     ).astype("float64")
 
-    # Create geometries efficiently
     n_geoms = coords.shape[0]
     flat_coords = coords.reshape(-1, 2)
     geom_offsets = np.arange(0, n_geoms + 1, dtype=np.int32) * 5
@@ -158,7 +161,6 @@ def detect_image(
         GeometryType.POLYGON, flat_coords, offsets=(geom_offsets, ring_offsets)
     )
 
-    # Create GeoDataFrame
     gdf = gpd.GeoDataFrame(
         {"confidence": conf, "class": cls, "geometry": geoms}, crs=tiler.epsg
     )
@@ -170,20 +172,30 @@ def detect_image(
     gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
     gdf.drop(columns=["index", "class"], inplace=True)
 
+    # ----- log bands used for inference
     metadata_dict = {
         "image_id": tiler.image_id,
         "image_datetime_utc": tiler.image_datetime,
+        "processed_date_utc": datetime.now(timezone.utc),
         "model_name": model_name,
     }
+
     gdf = gdf.assign(**metadata_dict)
+    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
+    gdf["bands"] = ["{" + ",".join(map(str, bands_value)) + "}"] * len(gdf)
 
     # Export
-    if export_dir:
-        os.makedirs(export_dir, exist_ok=True)
-        if export == "geojson":
-            gdf.to_file(
-                os.path.join(export_dir, f"{tiler.image_id}.geojson"), index=False
-            )
+    if export == "database":
+        gdf.to_postgis(table, database_connection, if_exists="append", index=False)
+    elif export == "geojson":
+        export_path = os.path.join(export_dir, f"{tiler.image_id}.geojson")
+        gdf.to_file(export_path, index=False)
+    elif export == "parquet":
+        export_path = os.path.join(export_dir, f"{tiler.image_id}.parquet")
+        gdf.to_file(export_path, index=False)
+    else:
+        print(f"No detections for {src}")
+
     return gdf
 
 
@@ -227,3 +239,86 @@ def _process_batch(
         batch_boxes.append(detections)
 
     return batch_boxes
+
+
+def detect(
+    src: Union[str, List[str]],
+    model_path: str,
+    window_size: int = 1024,
+    stride: float = 0.20,
+    confidence: float = 0.25,
+    iou: float = 0.45,
+    classes: Optional[List[int]] = None,
+    max_detections: int = 10000,
+    export: Union[Literal["geojson", "database", "parquet"], str] = "geojson",
+    export_dir: str = os.path.join(Path.home(), "detects"),
+    database_creds: Optional[str] = None,
+    table: Optional[str] = "detects",
+    device: int = 0,
+    half: bool = False,
+    bands: Optional[List[int]] = None,
+) -> None:
+    """
+    Main function for detection inference.
+
+    Args:
+        src (Union[str, List[str]]): Directory path of images, path to single image, or list of image paths
+        model_path (str): Path to model
+        window_size (int): Size of sliding window
+        stride (float): Amount of overlap in x, y direction, e.g., 0.2 for 20% overlap
+        confidence (float):  Confidence threshold
+        iou (float): NMS IoU threshold
+        classes (List[int]): Filters predictions to a set of class IDs. Only detections belonging to the specified classes will be returned.
+        max_detections (int): Maximum number of detections allowed per image.
+        export (Union[Literal["geojson", "database", "parquet"], str]): Type of export, options are local geojson, local parquet, or database
+        export_dir (str): Directory path to export detections to
+        database_creds (str): Credentials to database if pushing detects to database
+        table (str): Name of table to push detections to
+        device (int): Device number to use for inference
+        half (bool): Use FP16 half-precision inference
+        bands (List[int]): 1-indexed list of 3 band numbers if using MSI imagery
+
+    Return:
+        None
+    """
+
+    src_images = source_images(src=src)
+
+    model = YOLO(model_path, task="detect")
+    model_name = os.path.basename(model_path).split(".")[0]
+
+    if export == "database":
+        if not database_creds:
+            raise ValueError("Database credentials not supplied!")
+        else:
+            database_connection = connect(database_creds, driver="sqlalchemy")
+            setup_db(database_connection, detects_table=table)
+    if export != "database" and export_dir:
+        os.makedirs(export_dir, exist_ok=True)
+
+    if bands:
+        bands = list(map(int, bands))
+        bands = [x - 1 for x in bands]  # go from 1 index to 0 index
+
+    with tqdm(total=len(src_images), unit="image") as progress_bar:
+        for src in src_images:
+            progress_bar.set_description(f"{os.path.basename(src).split('.')[0]}")
+            detect_image(
+                src,
+                model,
+                model_name,
+                device=device,
+                window_size=window_size,
+                stride=stride,
+                confidence=confidence,
+                iou=iou,
+                classes=classes,
+                half=half,
+                max_detections=max_detections,
+                export=export,
+                export_dir=export_dir,
+                database_connection=database_connection,
+                table=table,
+                bands=bands,
+            )
+            progress_bar.update(1)
