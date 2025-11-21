@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 import pandas as pd
@@ -6,7 +7,6 @@ from tqdm import tqdm
 import geopandas as gpd
 from pathlib import Path
 from ultralytics import YOLO
-from shapely.geometry import Polygon
 from torchvision.ops import batched_nms
 from datetime import datetime, timezone
 from shapely import from_ragged_array, GeometryType
@@ -14,7 +14,10 @@ from typing import List, Literal, Optional, Tuple, Union, Any
 
 from geoyolo.core.tileservice import TilingService
 from geoyolo.core.utils import source_images
+from geoyolo.core.logger import logger
 from geoyolo.core.database import connect, setup_db
+
+logger.propagate = False
 
 
 def nms(boxes, conf_threshold=0.05, iou_threshold=0.3):
@@ -41,6 +44,7 @@ def detect_image(
     model,
     model_name: str,
     device: int = 0,
+    batch_size: int = 8,
     window_size: int = 1024,
     stride: float = 0.1,
     bands: Optional[List[int]] = None,
@@ -53,7 +57,6 @@ def detect_image(
     export_dir: str = os.path.join(Path.home(), "detects"),
     database_connection=None,
     table: Optional[str] = "detects",
-    batch_size: int = 8,
 ):
     """
     Run inference on single image with batched processing.
@@ -61,6 +64,16 @@ def detect_image(
     Args:
         batch_size (int): Number of tiles to process in parallel on GPU
     """
+    logger.info(f"image: {src}")
+    logger.info(f"model: {model_name}")
+    logger.info(f"device: {device}")
+    logger.info(f"batch size: {batch_size}")
+    logger.info(f"bands: {bands}")
+    logger.info(f"window_size: {window_size}")
+    logger.info(f"stride: {stride}")
+    logger.info(f"confidence threshold: {confidence}")
+    logger.info(f"nms threshold: {iou}")
+    logger.info(f"export: {export}")
 
     tiler = TilingService(
         src,
@@ -74,6 +87,8 @@ def detect_image(
     all_boxes = []
     tile_batch: List[np.ndarray] = []
     offset_batch: List[Tuple[int, int]] = []
+
+    inference_start = time.time()
 
     while True:
         tile = tiler.get_tile()
@@ -121,8 +136,15 @@ def detect_image(
             columns=["confidence", "label", "geometry"], crs=tiler.epsg
         )
 
+    inference_end = time.time()
+    logger.info(f"Inference speed: {inference_end - inference_start:.2f} seconds")
+
     merged_detections = torch.cat(all_boxes, dim=0)
+
+    nms_start = time.time()
     nms_detects = nms(merged_detections, conf_threshold=confidence, iou_threshold=iou)
+    nms_end = time.time()
+    logger.info(f"NMS speed: {nms_end - nms_start:.2f} seconds")
 
     detects_cpu = nms_detects.cpu().numpy()
 
@@ -135,6 +157,7 @@ def detect_image(
     conf = detects_cpu[:, 4]
     cls = detects_cpu[:, 5].astype(int)
 
+    affine_start = time.time()
     gt = src_geotransform
     ul_lon = gt[0] + x1 * gt[1] + y1 * gt[2]
     ul_lat = gt[3] + x1 * gt[4] + y1 * gt[5]
@@ -151,7 +174,10 @@ def detect_image(
         ],
         axis=1,
     ).astype("float64")
+    affine_end = time.time()
+    logger.info(f"Affine Transform speed: {affine_end - affine_start:.2f} seconds")
 
+    geoproc_start = time.time()
     n_geoms = coords.shape[0]
     flat_coords = coords.reshape(-1, 2)
     geom_offsets = np.arange(0, n_geoms + 1, dtype=np.int32) * 5
@@ -183,8 +209,11 @@ def detect_image(
     gdf = gdf.assign(**metadata_dict)
     bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
     gdf["bands"] = ["{" + ",".join(map(str, bands_value)) + "}"] * len(gdf)
+    geoproc_end = time.time()
+    logger.info(f"Geo/postprocessing speed: {geoproc_end - geoproc_start:.2f} seconds")
 
     # Export
+    export_start = time.time()
     if export == "database":
         gdf.to_postgis(table, database_connection, if_exists="append", index=False)
     elif export == "geojson":
@@ -195,6 +224,8 @@ def detect_image(
         gdf.to_file(export_path, index=False)
     else:
         print(f"No detections for {src}")
+    export_end = time.time()
+    logger.info(f"Export speed: {export_end - export_start:.2f} seconds")
 
     return gdf
 
@@ -255,6 +286,7 @@ def detect(
     database_creds: Optional[str] = None,
     table: Optional[str] = "detects",
     device: int = 0,
+    batch_size: int = 8,
     half: bool = False,
     bands: Optional[List[int]] = None,
 ) -> None:
@@ -275,6 +307,7 @@ def detect(
         database_creds (str): Credentials to database if pushing detects to database
         table (str): Name of table to push detections to
         device (int): Device number to use for inference
+        batch_size (int): Number of tiles to process in parallel on GPU
         half (bool): Use FP16 half-precision inference
         bands (List[int]): 1-indexed list of 3 band numbers if using MSI imagery
 
@@ -308,6 +341,7 @@ def detect(
                 model,
                 model_name,
                 device=device,
+                batch_size=batch_size,
                 window_size=window_size,
                 stride=stride,
                 confidence=confidence,

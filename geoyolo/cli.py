@@ -35,6 +35,13 @@ def main():
     )
 
     detect_parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Number of tiles to process in parallel on GPU",
+    )
+
+    detect_parser.add_argument(
         "--window_size",
         type=int,
         default=1024,

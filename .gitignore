@@ -38,3 +38,4 @@ yolov11.yaml
 yolo_train.yaml
 yolov8shallow.yaml
 db.json
+logs/
