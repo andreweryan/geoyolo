@@ -68,7 +68,8 @@ def detect_image(
     logger.info(f"model: {model_name}")
     logger.info(f"device: {device}")
     logger.info(f"batch size: {batch_size}")
-    logger.info(f"bands: {bands}")
+    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
+    logger.info(f"bands: {bands_value}")
     logger.info(f"window_size: {window_size}")
     logger.info(f"stride: {stride}")
     logger.info(f"confidence threshold: {confidence}")
@@ -207,7 +208,6 @@ def detect_image(
     }
 
     gdf = gdf.assign(**metadata_dict)
-    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
     gdf["bands"] = ["{" + ",".join(map(str, bands_value)) + "}"] * len(gdf)
     geoproc_end = time.time()
     logger.info(f"Geo/postprocessing speed: {geoproc_end - geoproc_start:.2f} seconds")
