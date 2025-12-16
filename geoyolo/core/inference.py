@@ -1,5 +1,5 @@
 import os
-import time
+from time import perf_counter
 import torch
 import numpy as np
 import pandas as pd
@@ -64,17 +64,6 @@ def detect_image(
     Args:
         batch_size (int): Number of tiles to process in parallel on GPU
     """
-    logger.info(f"image: {src}")
-    logger.info(f"model: {model_name}")
-    logger.info(f"device: {device}")
-    logger.info(f"batch size: {batch_size}")
-    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
-    logger.info(f"bands: {bands_value}")
-    logger.info(f"window_size: {window_size}")
-    logger.info(f"stride: {stride}")
-    logger.info(f"confidence threshold: {confidence}")
-    logger.info(f"nms threshold: {iou}")
-    logger.info(f"export: {export}")
 
     tiler = TilingService(
         src,
@@ -89,7 +78,8 @@ def detect_image(
     tile_batch: List[np.ndarray] = []
     offset_batch: List[Tuple[int, int]] = []
 
-    inference_start = time.time()
+    start = perf_counter()
+    inference_start = perf_counter()
 
     while True:
         tile = tiler.get_tile()
@@ -137,14 +127,14 @@ def detect_image(
             columns=["confidence", "label", "geometry"], crs=tiler.epsg
         )
 
-    inference_end = time.time()
+    inference_end = perf_counter()
     logger.info(f"Inference speed: {inference_end - inference_start:.2f} seconds")
 
     merged_detections = torch.cat(all_boxes, dim=0)
 
-    nms_start = time.time()
+    nms_start = perf_counter()
     nms_detects = nms(merged_detections, conf_threshold=confidence, iou_threshold=iou)
-    nms_end = time.time()
+    nms_end = perf_counter()
     logger.info(f"NMS speed: {nms_end - nms_start:.2f} seconds")
 
     detects_cpu = nms_detects.cpu().numpy()
@@ -158,7 +148,7 @@ def detect_image(
     conf = detects_cpu[:, 4]
     cls = detects_cpu[:, 5].astype(int)
 
-    affine_start = time.time()
+    affine_start = perf_counter()
     gt = src_geotransform
     ul_lon = gt[0] + x1 * gt[1] + y1 * gt[2]
     ul_lat = gt[3] + x1 * gt[4] + y1 * gt[5]
@@ -175,10 +165,10 @@ def detect_image(
         ],
         axis=1,
     ).astype("float64")
-    affine_end = time.time()
+    affine_end = perf_counter()
     logger.info(f"Affine Transform speed: {affine_end - affine_start:.2f} seconds")
 
-    geoproc_start = time.time()
+    geoproc_start = perf_counter()
     n_geoms = coords.shape[0]
     flat_coords = coords.reshape(-1, 2)
     geom_offsets = np.arange(0, n_geoms + 1, dtype=np.int32) * 5
@@ -199,7 +189,6 @@ def detect_image(
     gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
     gdf.drop(columns=["index", "class"], inplace=True)
 
-    # ----- log bands used for inference
     metadata_dict = {
         "image_id": tiler.image_id,
         "image_datetime_utc": tiler.image_datetime,
@@ -208,12 +197,13 @@ def detect_image(
     }
 
     gdf = gdf.assign(**metadata_dict)
+    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
     gdf["bands"] = ["{" + ",".join(map(str, bands_value)) + "}"] * len(gdf)
-    geoproc_end = time.time()
+    geoproc_end = perf_counter()
     logger.info(f"Geo/postprocessing speed: {geoproc_end - geoproc_start:.2f} seconds")
 
     # Export
-    export_start = time.time()
+    export_start = perf_counter()
     if export == "database":
         gdf.to_postgis(table, database_connection, if_exists="append", index=False)
     elif export == "geojson":
@@ -224,8 +214,10 @@ def detect_image(
         gdf.to_file(export_path, index=False)
     else:
         print(f"No detections for {src}")
-    export_end = time.time()
+    export_end = perf_counter()
+    end = perf_counter()
     logger.info(f"Export speed: {export_end - export_start:.2f} seconds")
+    logger.info(f"Total time: {end - start:.2f} seconds")
 
     return gdf
 
@@ -318,7 +310,15 @@ def detect(
     src_images = source_images(src=src)
 
     model = YOLO(model_path, task="detect")
-    model_name = os.path.basename(model_path).split(".")[0]
+    model_name, model_ext = os.path.basename(model_path).split(".")
+    if model_ext == "engine":
+        model_format = "TensorRT"
+    elif model_ext == "onnx":
+        model_format = "ONNX"
+    elif model_ext == "torchscript":
+        model_format = "TorchScript"
+    else:
+        model_format = "PyTorch"
 
     if export == "database":
         if not database_creds:
@@ -327,6 +327,7 @@ def detect(
             database_connection = connect(database_creds, driver="sqlalchemy")
             setup_db(database_connection, detects_table=table)
     if export != "database" and export_dir:
+        database_connection = None
         os.makedirs(export_dir, exist_ok=True)
 
     if bands:
@@ -335,6 +336,19 @@ def detect(
 
     with tqdm(total=len(src_images), unit="image") as progress_bar:
         for src in src_images:
+            logger.info(f"image: {src}")
+            logger.info(f"model: {model_name}")
+            logger.info(f"model format: {model_format}")
+            logger.info(f"device: {device}")
+            logger.info(f"batch size: {batch_size}")
+            bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
+            logger.info(f"bands: {bands_value}")
+            logger.info(f"window_size: {window_size}")
+            logger.info(f"stride: {stride}")
+            logger.info(f"confidence threshold: {confidence}")
+            logger.info(f"nms threshold: {iou}")
+            logger.info(f"export: {export}")
+
             progress_bar.set_description(f"{os.path.basename(src).split('.')[0]}")
             detect_image(
                 src,
