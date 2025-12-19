@@ -63,7 +63,6 @@ class TilingService:
         self.thread.start()
 
     def make_windows(self):
-        gt = np.array(self.geotransform)
         step = int(self.window_size * (1 - self.stride))
         xoffs = np.arange(0, self.width - self.window_size + 1, step)
         yoffs = np.arange(0, self.height - self.window_size + 1, step)
@@ -73,6 +72,7 @@ class TilingService:
             yoffs = np.append(yoffs, self.height - self.window_size)
         x_grid, y_grid = np.meshgrid(xoffs, yoffs, indexing="xy")
         windows = np.stack([x_grid.ravel(), y_grid.ravel()], axis=1)
+        self.num_tiles = len(windows)
         return windows
 
     def _producer(self):
@@ -119,3 +119,6 @@ class TilingService:
         if tile is self.stop_signal:
             return None
         return tile
+
+    def tile_count(self):
+        return self.num_tiles
