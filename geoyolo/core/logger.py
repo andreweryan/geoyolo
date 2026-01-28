@@ -14,7 +14,7 @@ log_filename = (
 )
 logging.basicConfig(
     filename=log_filename,
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - [%(levelname)8s] - %(name)s - %(message)s",
 )
 
