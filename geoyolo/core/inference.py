@@ -195,6 +195,7 @@ def detect_image(
         "image_datetime_utc": tiler.image_datetime,
         "processed_date_utc": datetime.now(timezone.utc),
         "model_name": model_name,
+        "model_type": "yolo",
     }
 
     gdf = gdf.assign(**metadata_dict)
@@ -339,6 +340,7 @@ def detect(
         for src in src_images:
             logger.info(f"image: {src}")
             logger.info(f"model: {model_name}")
+            logger.info("model type: yolo")
             logger.info(f"model format: {model_format}")
             logger.info(f"device: {device}")
             logger.info(f"batch size: {batch_size}")

@@ -69,6 +69,7 @@ def setup_db(connection, detects_table="detects"):
                     label TEXT,
                     image_id TEXT,
                     model_name TEXT,
+                    model_type TEXT,
                     bands INTEGER[],
                     image_datetime_utc TIMESTAMPTZ,
                     processed_date_utc TIMESTAMPTZ,
