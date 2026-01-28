@@ -65,6 +65,8 @@ def detect_image(
         batch_size (int): Number of tiles to process in parallel on GPU
     """
 
+    start = perf_counter()
+
     tiler = TilingService(
         src,
         bands=bands,
@@ -78,7 +80,6 @@ def detect_image(
     tile_batch: List[np.ndarray] = []
     offset_batch: List[Tuple[int, int]] = []
 
-    start = perf_counter()
     inference_start = perf_counter()
 
     while True:
