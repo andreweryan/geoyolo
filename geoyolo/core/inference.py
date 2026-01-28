@@ -271,6 +271,7 @@ def detect(
     model_path: str,
     window_size: int = 1024,
     stride: float = 0.20,
+    bands: Optional[List[int]] = None,
     confidence: float = 0.25,
     iou: float = 0.45,
     classes: Optional[List[int]] = None,
@@ -282,7 +283,6 @@ def detect(
     device: int = 0,
     batch_size: int = 8,
     half: bool = False,
-    bands: Optional[List[int]] = None,
 ) -> None:
     """
     Main function for detection inference.
