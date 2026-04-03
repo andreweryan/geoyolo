@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 echo "Detecting GDAL version from system..."
 

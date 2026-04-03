@@ -35,6 +35,13 @@ def main():
     )
 
     detect_parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Number of tiles to process in parallel on GPU",
+    )
+
+    detect_parser.add_argument(
         "--window_size",
         type=int,
         default=1024,
@@ -104,12 +111,6 @@ def main():
     )
 
     detect_parser.add_argument("--table", type=str, help="Database table name.")
-
-    detect_parser.add_argument(
-        "--encode_chip",
-        action="store_true",
-        help="base64 encode detection chip",
-    )
 
     detect_parser.set_defaults(func=detect)
 

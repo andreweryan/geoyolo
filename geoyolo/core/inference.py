@@ -1,247 +1,248 @@
 import os
+from time import perf_counter
 import torch
-import datetime
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from PIL import Image
-from osgeo import gdal
-from pyproj import CRS
 import geopandas as gpd
-from shapely.geometry import Polygon
+from pathlib import Path
 from ultralytics import YOLO
 from torchvision.ops import batched_nms
-from typing import List, Tuple, Union
+from datetime import datetime, timezone
+from shapely import from_ragged_array, GeometryType
+from typing import List, Literal, Optional, Tuple, Union, Any
 
+from geoyolo.core.tileservice import TilingService
 from geoyolo.core.utils import source_images
+from geoyolo.core.logger import logger
+from geoyolo.core.database import connect, setup_db
 
-gdal.UseExceptions()
-
-
-def make_windows(
-    src_geotransform: Tuple[float],
-    src_width: int,
-    src_height: int,
-    window_size: int = 512,
-    stride: float = 0.2,
-) -> List[List[Union[float, int]]]:
-    """
-    Get sliding window geoinformation for every window in an image (geotransform, image offsets, bounds).
-
-    Args:
-        src_geotransform (Tuple[float]): Source image GDAL GeoTransform
-        src_width (int): Image width in pixels.
-        src_height (int): Image height in pixels.
-        window_size (int): Size of sliding window in pixels.
-        stride (float): Sliding window overlap, as percentage of window_size, in x and y direction.
-
-    Return:
-        geoinfo_list (List[List[Union[float, int]]]): List of lists containing window geotransform and bounds information for all image windows
-    """
-
-    gt = np.array(src_geotransform)
-
-    step = int(window_size * (1 - stride))
-    xoffs = np.arange(0, src_width - window_size + 1, step)
-    yoffs = np.arange(0, src_height - window_size + 1, step)
-
-    if xoffs[-1] + window_size < src_width:
-        xoffs = np.append(xoffs, src_width - window_size)
-    if yoffs[-1] + window_size < src_height:
-        yoffs = np.append(yoffs, src_height - window_size)
-
-    x, y = np.meshgrid(xoffs, yoffs, indexing="xy")
-
-    x_flat = x.ravel()
-    y_flat = y.ravel()
-
-    x_c = x_flat + 0.5
-    y_c = y_flat + 0.5
-
-    ulx = gt[1] * x_c + gt[2] * y_c + gt[0]
-    uly = gt[4] * x_c + gt[5] * y_c + gt[3]
-
-    lrx = ulx + window_size * gt[1]
-    lry = uly + window_size * gt[5]
-
-    geoinfo_array = np.stack(
-        [
-            ulx,
-            lry,
-            lrx,
-            uly,
-            x_flat,
-            y_flat,
-            np.full_like(x_flat, window_size),
-            np.full_like(y_flat, window_size),
-        ],
-        axis=1,
-    )
-
-    geoinfo_list = geoinfo_array.tolist()
-
-    return geoinfo_list
+logger.propagate = False
 
 
-def box_iou(boxes1, boxes2):
-    """
-    Calculate IoU between all boxes from boxes1 with all boxes from boxes2
-
-    Args:
-        boxes1 (torch.Tensor): Tensor of shape (N, 4) representing bounding boxes with format (x1, y1, x2, y2)
-        boxes2 (torch.Tensor): Tensor of shape (M, 4) representing bounding boxes with format (x1, y1, x2, y2)
-
-    Returns:
-        iou (torch.Tensor): Tensor of shape (N, M) with IoU values for each pair of boxes
-    """
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])  # N
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])  # M
-
-    # Broadcasting to compute intersection areas for all pairs of boxes
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N, M, 2]
-    rb = torch.min(boxes1[:, None, 2:4], boxes2[:, 2:4])  # [N, M, 2]
-
-    wh = (rb - lt).clamp(min=0)  # [N, M, 2]
-    intersection = wh[:, :, 0] * wh[:, :, 1]  # [N, M]
-
-    union = area1[:, None] + area2 - intersection
-    iou = intersection / (union + 1e-6)  # [N, M]
-
-    return iou
-
-
-# need nms to handle oriented bboxes eventually
-def nms(boxes, conf_threshold=0.05, iou_threshold=0.3, max_detections=100000):
+def nms(boxes, conf_threshold=0.05, iou_threshold=0.3):
     """
     Non-Maximum Suppression NMS on detection boxes.
-
-    Args
-        boxes (torch.Tensor): Tensor of shape (N, 6) where each row is [x1, y1, x2, y2, confidence, class]
-        iou_threshold (float): IoU threshold for considering a box as a duplicate
-        conf_threshold (float): Confidence threshold to filter out low-confidence detections
-        max_detections (int): Maximum number of detections to keep
-
-    Returns:
-        nms_boxes (torch.Tensor): Filtered tensor containing only the kept boxes
     """
-
     mask = boxes[:, 4] >= conf_threshold
     boxes = boxes[mask]
 
     if boxes.shape[0] == 0:
         return torch.zeros((0, 6), device=boxes.device)
 
-    # Extract box coordinates, scores, and class labels
     box_coords = boxes[:, :4]
     scores = boxes[:, 4]
     classes = boxes[:, 5]
 
-    # Apply class-aware NMS
     keep_indices = batched_nms(box_coords, scores, classes, iou_threshold)
-
-    # Keep top detections if needed
-    # if max_detections:
-    #     keep_indices = keep_indices[:max_detections]
 
     return boxes[keep_indices]
 
 
 def detect_image(
-    image_path,
+    src,
     model,
-    device=0,
-    window_size=1024,
-    stride=0.1,
-    bands=None,
-    confidence=0.3,
-    iou=0.5,
-    classes=None,
-    max_detections=100000,
-    half=True,
-    xyxy=True,
-    export="geojson",
-    export_dir=None,
+    model_name: str,
+    device: int = 0,
+    batch_size: int = 8,
+    window_size: int = 1024,
+    stride: float = 0.1,
+    bands: Optional[List[int]] = None,
+    confidence: float = 0.3,
+    iou: float = 0.5,
+    classes: Optional[List[int]] = None,
+    max_detections: int = 100000,
+    half: bool = True,
+    export: Union[Literal["database", "geojson", "parquet"], str] = "geojson",
+    export_dir: str = os.path.join(Path.home(), "detects"),
+    database_connection=None,
+    table: Optional[str] = "detects",
 ):
     """
-    Run inference on single image.
+    Run inference on single image with batched processing.
 
     Args:
-        image_path (str): Path to image for inference
-        model (): Loaded YOLO model
-        device (int, str): Device to run inference on
-        window_size (int): Sliding window size
-        stride (float): Sliding window overlap in x & y directions
-        bands (List[int]): 1-indexed list of 3 band numbers if using MSI imagery
-        confidence (float): Confidence threshold
-        iou (float): NMS IoU threshold
-        classes (List[int]): Filter detects to a set of class ids. Only those detections will be returned
-        max_detections (int): Maximum number of detections allowed per image.
-        half (bool): Use FP16 half-precision inference
-        xyxy (bool): Return detection bboxes in xyxy format (x1, y1, x2, y2 aka upper left/lower right)
-        export (str): Type of export, e.g. geojson, parquet, database
-        export_dir (Str): Path to directory for flat file export
-    Returns:
-        detections (torch.Tensor): Detections tensor
+        batch_size (int): Number of tiles to process in parallel on GPU
     """
 
-    image = gdal.Open(image_path)
-    image_id = os.path.basename(image_path).split(".")[0]
-    width = image.RasterXSize
-    height = image.RasterYSize
-    band_count = image.RasterCount
-    info = gdal.Info(image, format="json")
-    src_geotransform = image.GetGeoTransform()
-    gcps = image.GetGCPs()
-    metadata = image.GetMetadata()
+    start = perf_counter()
 
-    try:
-        coord_system = info["coordinateSystem"]["wkt"]
-    except ValueError as e:
-        coord_system = info["gcps"]["coordinateSyste"]["wkt"]
-
-    if coord_system:
-        crs = CRS.from_wkt(coord_system)
-        epsg = crs.to_epsg()
-    else:
-        epsg = 4326
-
-    if src_geotransform[0] == 0 and len(gcps) > 0:
-        src_geotransform = gdal.GCPsToGeoTransform(gcps)
-
-    if "TIFFTAG_DATETIME" in metadata.keys():
-        date_time = metadata["TIFFTAG_DATETIME"]
-        image_datetime = datetime.strptime(date_time, "%Y:%m:%d %H:%M:%S")
-    else:
-        image_datetime = None
-
-    windows = make_windows(
-        src_geotransform,
-        width,
-        height,
+    tiler = TilingService(
+        src,
+        bands=bands,
         window_size=window_size,
         stride=stride,
+        max_queue=batch_size * 2,
+    )
+    src_geotransform = tiler.geotransform
+
+    all_boxes = []
+    tile_batch: List[np.ndarray] = []
+    offset_batch: List[Tuple[int, int]] = []
+
+    inference_start = perf_counter()
+
+    while True:
+        tile = tiler.get_tile()
+        if tile is None:
+            if tile_batch:
+                all_boxes.extend(
+                    _process_batch(
+                        model,
+                        tile_batch,
+                        offset_batch,
+                        window_size,
+                        confidence,
+                        iou,
+                        max_detections,
+                        classes,
+                        half,
+                        device,
+                    )
+                )
+            break
+
+        tile_batch.append(tile["array"])
+        offset_batch.append((tile["xoff"], tile["yoff"]))
+
+        if len(tile_batch) >= batch_size:
+            all_boxes.extend(
+                _process_batch(
+                    model,
+                    tile_batch,
+                    offset_batch,
+                    window_size,
+                    confidence,
+                    iou,
+                    max_detections,
+                    classes,
+                    half,
+                    device,
+                )
+            )
+            tile_batch = []
+            offset_batch = []
+
+    if len(all_boxes) == 0:
+        return gpd.GeoDataFrame(
+            columns=["confidence", "label", "geometry"], crs=tiler.epsg
+        )
+
+    inference_end = perf_counter()
+    logger.info(f"Inference speed: {inference_end - inference_start:.2f} seconds")
+
+    merged_detections = torch.cat(all_boxes, dim=0)
+
+    nms_start = perf_counter()
+    nms_detects = nms(merged_detections, conf_threshold=confidence, iou_threshold=iou)
+    nms_end = perf_counter()
+    logger.info(f"NMS speed: {nms_end - nms_start:.2f} seconds")
+
+    detects_cpu = nms_detects.cpu().numpy()
+
+    x1, y1, x2, y2 = (
+        detects_cpu[:, 0],
+        detects_cpu[:, 1],
+        detects_cpu[:, 2],
+        detects_cpu[:, 3],
+    )
+    conf = detects_cpu[:, 4]
+    cls = detects_cpu[:, 5].astype(int)
+
+    affine_start = perf_counter()
+    gt = src_geotransform
+    ul_lon = gt[0] + x1 * gt[1] + y1 * gt[2]
+    ul_lat = gt[3] + x1 * gt[4] + y1 * gt[5]
+    lr_lon = gt[0] + x2 * gt[1] + y2 * gt[2]
+    lr_lat = gt[3] + x2 * gt[4] + y2 * gt[5]
+
+    coords = np.stack(
+        [
+            np.column_stack([ul_lon, ul_lat]),
+            np.column_stack([lr_lon, ul_lat]),
+            np.column_stack([lr_lon, lr_lat]),
+            np.column_stack([ul_lon, lr_lat]),
+            np.column_stack([ul_lon, ul_lat]),
+        ],
+        axis=1,
+    ).astype("float64")
+    affine_end = perf_counter()
+    logger.info(f"Affine Transform speed: {affine_end - affine_start:.2f} seconds")
+
+    geoproc_start = perf_counter()
+    n_geoms = coords.shape[0]
+    flat_coords = coords.reshape(-1, 2)
+    geom_offsets = np.arange(0, n_geoms + 1, dtype=np.int32) * 5
+    ring_offsets = np.arange(0, n_geoms + 1, dtype=np.int32)
+
+    geoms = from_ragged_array(
+        GeometryType.POLYGON, flat_coords, offsets=(geom_offsets, ring_offsets)
     )
 
-    tensor_list = []
+    gdf = gpd.GeoDataFrame(
+        {"confidence": conf, "class": cls, "geometry": geoms}, crs=tiler.epsg
+    )
 
-    for window in windows:
-        xoff = int(window[4])
-        yoff = int(window[5])
-        xsize = int(window[6])
-        ysize = int(window[7])
+    # Add metadata
+    class_map = pd.DataFrame.from_dict(model.names, orient="index", columns=["label"])
+    class_map.reset_index(inplace=True)
 
-        window_array = image.ReadAsArray(xoff, yoff, xsize, ysize)
+    gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
+    gdf.drop(columns=["index", "class"], inplace=True)
 
-        if band_count == 1:  # if single band, convert to 3 band
-            window_array = np.array([window_array] * 3)
+    metadata_dict = {
+        "image_id": tiler.image_id,
+        "image_datetime_utc": tiler.image_datetime,
+        "processed_date_utc": datetime.now(timezone.utc),
+        "model_name": model_name,
+        "model_type": "yolo",
+    }
 
-        if bands:  # select bands to place into R, G, B channels
-            window_array = window_array[bands]
+    gdf = gdf.assign(**metadata_dict)
+    bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
+    gdf["bands"] = ["{" + ",".join(map(str, bands_value)) + "}"] * len(gdf)
+    geoproc_end = perf_counter()
+    logger.info(f"Geo/postprocessing speed: {geoproc_end - geoproc_start:.2f} seconds")
 
-        window_array = np.rollaxis(window_array, 0, 3)
+    # Export
+    export_start = perf_counter()
+    if export == "database":
+        gdf.to_postgis(table, database_connection, if_exists="append", index=False)
+    elif export == "geojson":
+        export_path = os.path.join(export_dir, f"{tiler.image_id}.geojson")
+        gdf.to_file(export_path, index=False)
+    elif export == "parquet":
+        export_path = os.path.join(export_dir, f"{tiler.image_id}.parquet")
+        gdf.to_file(export_path, index=False)
+    else:
+        print(f"No detections for {src}")
+    export_end = perf_counter()
+    end = perf_counter()
+    logger.info(f"Export speed: {export_end - export_start:.2f} seconds")
+    logger.info(f"Total time: {end - start:.2f} seconds")
 
+    return gdf
+
+
+def _process_batch(
+    model,
+    tile_batch,
+    offset_batch,
+    window_size,
+    confidence,
+    iou,
+    max_detections,
+    classes,
+    half,
+    device,
+):
+    """Process a batch of tiles through the model."""
+
+    batch_boxes = []
+
+    for tile_array, (xoff, yoff) in zip(tile_batch, offset_batch):
         results = model(
-            window_array,
+            tile_array,
             imgsz=window_size,
             conf=confidence,
             iou=iou,
@@ -251,278 +252,124 @@ def detect_image(
             device=device,
             verbose=False,
         )
-
-        boxes = results[0].boxes.xyxy.clone()
-        # if OBB need to get the OBB boxes
-
-        boxes[:, 0] += xoff  # x1
-        boxes[:, 1] += yoff  # y1
-        boxes[:, 2] += xoff  # x2
-        boxes[:, 3] += yoff  # y2
-
-        confs = results[0].boxes.conf  # confidences
-        cls = results[0].boxes.cls  # classes
-
+        result = results[0]  # single tile
+        if len(result.boxes) == 0:
+            continue
+        boxes = result.boxes.xyxy.clone()
+        boxes[:, [0, 2]] += xoff
+        boxes[:, [1, 3]] += yoff
+        confs = result.boxes.conf
+        cls = result.boxes.cls
         detections = torch.cat([boxes, confs.unsqueeze(1), cls.unsqueeze(1)], dim=1)
-        tensor_list.append(detections)
+        batch_boxes.append(detections)
 
-    merged_detections = torch.cat(tensor_list, dim=0)
-
-    nms_detects = nms(
-        merged_detections,
-        conf_threshold=confidence,
-        iou_threshold=iou,
-        max_detections=max_detections,
-    )
-
-    if xyxy:
-        """upper-left lon/lat (x1, y1)"""
-        ul_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 0] * src_geotransform[1]
-            + nms_detects[:, 1] * src_geotransform[2]
-        )
-        ul_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 0] * src_geotransform[4]
-            + nms_detects[:, 1] * src_geotransform[5]
-        )
-
-        """lower-right lon/lat (x1, y2)"""
-        lr_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 2] * src_geotransform[1]
-            + nms_detects[:, 3] * src_geotransform[2]
-        )
-        lr_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 2] * src_geotransform[4]
-            + nms_detects[:, 3] * src_geotransform[5]
-        )
-
-        geodetections = torch.stack([ul_lon, ul_lat, lr_lon, lr_lat], dim=1)
-
-    else:  # xyxyxyxy will need this + rotation for OBB detector models
-        """upper-left lon/lat (x1, y1)"""
-        ul_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 0] * src_geotransform[1]
-            + nms_detects[:, 1] * src_geotransform[2]
-        )
-        ul_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 0] * src_geotransform[4]
-            + nms_detects[:, 1] * src_geotransform[5]
-        )
-
-        """lower-right lon/lat (x2, y2)"""
-        lr_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 2] * src_geotransform[1]
-            + nms_detects[:, 3] * src_geotransform[2]
-        )
-        lr_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 2] * src_geotransform[4]
-            + nms_detects[:, 3] * src_geotransform[5]
-        )
-
-        """upper-right lon/lat (x2, y1)"""
-        ur_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 2] * src_geotransform[1]
-            + nms_detects[:, 1] * src_geotransform[2]
-        )
-        ur_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 2] * src_geotransform[4]
-            + nms_detects[:, 1] * src_geotransform[5]
-        )
-
-        """lower-left lon/lat (x1, y2)"""
-        ll_lon = (
-            src_geotransform[0]
-            + nms_detects[:, 0] * src_geotransform[1]
-            + nms_detects[:, 3] * src_geotransform[2]
-        )
-        ll_lat = (
-            src_geotransform[3]
-            + nms_detects[:, 0] * src_geotransform[4]
-            + nms_detects[:, 3] * src_geotransform[5]
-        )
-
-        """xyxyxyxy: upper left, upper right, lower right, lower left"""
-        geodetections = torch.stack(
-            [ul_lon, ul_lat, ur_lon, ur_lat, lr_lon, lr_lat, ll_lon, ll_lat], dim=1
-        )
-
-    # if encode_chip place here, use global xyxy to grab pixels from image
-
-    detects = torch.cat([nms_detects, geodetections], dim=1)
-
-    # need to export detections here (postgres/gis, geojson, parquet)...
-    # for db, need to make connection to db, ensure table exists, if not create it, add primary key
-    data = []
-
-    header = ["x1", "y1", "x2", "y2", "confidence", "class"]
-
-    if xyxy:
-        header = header + ["ul_lon", "ul_lat", "lr_lon", "lr_lat", "geom"]
-        for box in detects.cpu().numpy():
-            x1, y1, x2, y2, conf, cls, ul_lon, ul_lat, lr_lon, lr_lat = box
-            ur_lon, ur_lat = lr_lon, ul_lat
-            ll_lon, ll_lat = ul_lon, lr_lat
-
-            coords = [
-                (ul_lon, ul_lat),
-                (ur_lon, ur_lat),
-                (lr_lon, lr_lat),
-                (ll_lon, ll_lat),
-                (ul_lon, ul_lat),
-            ]
-            geom = Polygon(coords)
-            data.append(
-                [x1, y1, x2, y2, conf, int(cls), ul_lon, ul_lat, lr_lon, lr_lat, geom]
-            )
-    else:
-        header = header + [
-            "ul_lon",
-            "ul_lat",
-            "ur_lon",
-            "ur_lat",
-            "lr_lon",
-            "lr_lat",
-            "ll_lon",
-            "ll_lat",
-            "geom",
-        ]
-        for box in detects.cpu().numpy():
-            (
-                x1,
-                y1,
-                x2,
-                y2,
-                conf,
-                cls,
-                ul_lon,
-                ul_lat,
-                ur_lon,
-                ur_lat,
-                lr_lon,
-                lr_lat,
-                ll_lon,
-                ll_lat,
-            ) = box
-            coords = [
-                (ul_lon, ul_lat),
-                (ur_lon, ur_lat),
-                (lr_lon, lr_lat),
-                (ll_lon, ll_lat),
-                (ul_lon, ul_lat),
-            ]
-
-            geom = Polygon(coords)
-            data.append(
-                [
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    conf,
-                    int(cls),
-                    ul_lon,
-                    ul_lat,
-                    ur_lon,
-                    ur_lat,
-                    lr_lon,
-                    lr_lat,
-                    ll_lon,
-                    ll_lat,
-                    geom,
-                ]
-            )
-
-    gdf = gpd.GeoDataFrame(data, columns=header, geometry="geom", crs=epsg)
-
-    metadata_dict = {
-        "image_id": image_id,
-        "image_datetime_utc": image_datetime,
-        "width": width,
-        "height": height,
-        "geotransform": str(src_geotransform),
-        "epsg": epsg,
-    }
-
-    class_map = pd.DataFrame.from_dict(model.names, orient="index", columns=["label"])
-    class_map.reset_index(inplace=True)
-
-    gdf = gdf.merge(class_map, left_on="class", right_on="index", how="left")
-    gdf.drop(columns="index", inplace=True)
-
-    gdf = gdf.assign(**metadata_dict)
-
-    # rearranging columns so class and label are next to one another
-    cols = list(gdf.columns)
-    class_idx = cols.index("class")
-    cols.remove("label")
-    cols.insert(class_idx + 1, "label")
-    gdf = gdf[cols]
-
-    if export_dir:
-        os.makedirs(export_dir, exist_ok=True)
-
-    if export == "geojson":
-        gdf.to_file(os.path.join(export_dir, f"{image_id}.geojson"), index=False)
-
-    return gdf
+    return batch_boxes
 
 
 def detect(
-    src,
-    model_path,
-    device=0,
-    window_size=1024,
-    stride=0.1,
-    bands=None,
-    confidence=0.5,
-    iou=0.3,
-    classes=None,
-    max_detections=100000,
-    half=True,
-    xyxy=True,
-    export="geojson",
-    export_dir=None,
-):
+    src: Union[str, List[str]],
+    model_path: str,
+    window_size: int = 1024,
+    stride: float = 0.20,
+    bands: Optional[List[int]] = None,
+    confidence: float = 0.25,
+    iou: float = 0.45,
+    classes: Optional[List[int]] = None,
+    max_detections: int = 10000,
+    export: Union[Literal["geojson", "database", "parquet"], str] = "geojson",
+    export_dir: str = os.path.join(Path.home(), "detects"),
+    database_creds: Optional[str] = None,
+    table: Optional[str] = "detects",
+    device: int = 0,
+    batch_size: int = 8,
+    half: bool = False,
+) -> None:
     """
     Main function for detection inference.
+
+    Args:
+        src (Union[str, List[str]]): Directory path of images, path to single image, or list of image paths
+        model_path (str): Path to model
+        window_size (int): Size of sliding window
+        stride (float): Amount of overlap in x, y direction, e.g., 0.2 for 20% overlap
+        confidence (float):  Confidence threshold
+        iou (float): NMS IoU threshold
+        classes (List[int]): Filters predictions to a set of class IDs. Only detections belonging to the specified classes will be returned.
+        max_detections (int): Maximum number of detections allowed per image.
+        export (Union[Literal["geojson", "database", "parquet"], str]): Type of export, options are local geojson, local parquet, or database
+        export_dir (str): Directory path to export detections to
+        database_creds (str): Credentials to database if pushing detects to database
+        table (str): Name of table to push detections to
+        device (int): Device number to use for inference
+        batch_size (int): Number of tiles to process in parallel on GPU
+        half (bool): Use FP16 half-precision inference
+        bands (List[int]): 1-indexed list of 3 band numbers if using MSI imagery
+
+    Return:
+        None
     """
 
     src_images = source_images(src=src)
 
     model = YOLO(model_path, task="detect")
+    model_name, model_ext = os.path.basename(model_path).split(".")
+    if model_ext == "engine":
+        model_format = "TensorRT"
+    elif model_ext == "onnx":
+        model_format = "ONNX"
+    elif model_ext == "torchscript":
+        model_format = "TorchScript"
+    else:
+        model_format = "PyTorch"
 
-    model_name = os.path.basename(model_path).split(".")[0]
+    if export == "database":
+        if not database_creds:
+            raise ValueError("Database credentials not supplied!")
+        else:
+            database_connection = connect(database_creds, driver="sqlalchemy")
+            setup_db(database_connection, detects_table=table)
+    if export != "database" and export_dir:
+        database_connection = None
+        os.makedirs(export_dir, exist_ok=True)
+
+    if bands:
+        bands = list(map(int, bands))
+        bands = [x - 1 for x in bands]  # go from 1 index to 0 index
 
     with tqdm(total=len(src_images), unit="image") as progress_bar:
-        for image_path in src_images:
+        for src in src_images:
+            logger.info(f"image: {src}")
+            logger.info(f"model: {model_name}")
+            logger.info("model type: yolo")
+            logger.info(f"model format: {model_format}")
+            logger.info(f"device: {device}")
+            logger.info(f"batch size: {batch_size}")
+            bands_value = [x + 1 for x in bands] if bands else [1, 2, 3]
+            logger.info(f"bands: {bands_value}")
+            logger.info(f"window_size: {window_size}")
+            logger.info(f"stride: {stride}")
+            logger.info(f"confidence threshold: {confidence}")
+            logger.info(f"nms threshold: {iou}")
+            logger.info(f"export: {export}")
 
-            progress_bar.set_description(f"{os.path.basename(src).split(".")[0]}")
-
-            detects = detect_image(
-                image_path,
+            progress_bar.set_description(f"{os.path.basename(src).split('.')[0]}")
+            detect_image(
+                src,
                 model,
+                model_name,
                 device=device,
+                batch_size=batch_size,
                 window_size=window_size,
                 stride=stride,
-                bands=bands,
                 confidence=confidence,
                 iou=iou,
                 classes=classes,
-                max_detections=max_detections,
                 half=half,
-                xyxy=xyxy,
+                max_detections=max_detections,
                 export=export,
                 export_dir=export_dir,
+                database_connection=database_connection,
+                table=table,
+                bands=bands,
             )
-
             progress_bar.update(1)
