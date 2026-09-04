@@ -84,7 +84,7 @@ def main():
     )
 
     detect_parser.add_argument(
-        "--half",
+        "--quantize",
         action="store_true",
         help="Run model in fp16/half precision mode.",
     )
